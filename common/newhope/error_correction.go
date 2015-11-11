@@ -1,6 +1,6 @@
 // error_correction.go - New Hope key exchange error correction.
 //
-// To the extent possible under law, Yawning Angels has waived all copyright
+// To the extent possible under law, Yawning Angel has waived all copyright
 // and related or neighboring rights to newhope, using the Creative
 // Commons "CC0" public domain dedication. See LICENSE or
 // <http://creativecommons.org/publicdomain/zero/1.0/> for full details.
@@ -20,8 +20,8 @@ func f(v0, v1 *int32, x int32) int32 {
 	// Next 6 lines compute t = x/PARAM_Q
 	b := x * 2730
 	t := b >> 25
-	b = x - t*12289
-	b = 12288 - b
+	b = x - t*paramQ
+	b = (paramQ-1) - b
 	b >>= 31
 	t -= b
 
