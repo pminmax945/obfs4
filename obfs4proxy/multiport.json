@@ -1,0 +1,18 @@
+{"obfs4":[
+    {"ListenAddr":"127.0.0.1:35",
+     "ServerAddr":"212.40.60.41:23",
+     "PtArgs":"cert=tMAfVnvB4Y0PpZanelDI338h5FDz60wgo98Kari9yeBxe/3g2qtCWY2grRgLHbwToY0IFw;iat-mode=0"
+    },
+    {
+     "ListenAddr":"127.0.0.1:3342",
+     "ServerAddr":"53.23.39.2:3413",
+     "PtArgs":"cert=tMAfVnvB4Y0PpZanelDI338h5FDz60wgo98Kari9yeBxe/3g2qtCWY2grRgLHbwToY0IFw;iat-mode=0"
+    }
+],
+"obfs3":[
+    {"ListenAddr":"127.0.0.1:3422", 
+     "ServerAddr":"34.31.25.72:699", 
+     "PtArgs":"" 
+    }
+]
+}

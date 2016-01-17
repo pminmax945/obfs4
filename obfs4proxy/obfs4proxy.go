@@ -30,14 +30,17 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	golog "log"
 	"net"
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -45,7 +48,6 @@ import (
 
 	"git.torproject.org/pluggable-transports/goptlib.git"
 	"git.torproject.org/pluggable-transports/obfs4.git/common/log"
-	"git.torproject.org/pluggable-transports/obfs4.git/common/socks5"
 	"git.torproject.org/pluggable-transports/obfs4.git/transports"
 	"git.torproject.org/pluggable-transports/obfs4.git/transports/base"
 )
@@ -53,11 +55,30 @@ import (
 const (
 	obfs4proxyVersion = "0.0.6-dev"
 	obfs4proxyLogFile = "obfs4proxy.log"
-	socksAddr         = "127.0.0.1:0"
 )
 
 var stateDir string
 var termMon *termMonitor
+
+type LinkInfo struct {
+	ListenAddr string
+	ServerAddr string
+	PtArgs     string
+}
+
+func parseConfig(bytes []byte) map[string][]LinkInfo {
+
+	ret := make(map[string][]LinkInfo)
+
+	err := json.Unmarshal(bytes, &ret)
+
+	if err != nil {
+		fmt.Println("unable to parse config file ", err)
+		golog.Fatal(err)
+	}
+
+	return ret
+}
 
 func clientSetup() (launched bool, listeners []net.Listener) {
 	ptClientInfo, err := pt.ClientSetup(transports.Transports())
@@ -72,11 +93,29 @@ func clientSetup() (launched bool, listeners []net.Listener) {
 		ptProxyDone()
 	}
 
+	configFile := os.Getenv("TCP_PROXY_CONFIG_FILE")
+
+	bytes, er := ioutil.ReadFile(configFile)
+
+	if er != nil {
+		fmt.Println("unable to read config file ", configFile)
+		golog.Fatal(err)
+	}
+
+	fmt.Println("parse config file ", configFile)
+	config := parseConfig(bytes)
+
 	// Launch each of the client listeners.
 	for _, name := range ptClientInfo.MethodNames {
 		t := transports.Get(name)
 		if t == nil {
 			pt.CmethodError(name, "no such transport is supported")
+			continue
+		}
+
+		links, has := config[name]
+
+		if !has {
 			continue
 		}
 
@@ -86,26 +125,31 @@ func clientSetup() (launched bool, listeners []net.Listener) {
 			continue
 		}
 
-		ln, err := net.Listen("tcp", socksAddr)
-		if err != nil {
-			pt.CmethodError(name, err.Error())
-			continue
+		for _, link := range links {
+
+			fmt.Println("create tcp proxy ", name, link.ListenAddr, link.ServerAddr, link.PtArgs)
+			ln, er := net.Listen("tcp", link.ListenAddr)
+			if er != nil {
+				pt.CmethodError(name, er.Error())
+				continue
+			}
+
+			go clientAcceptLoop(f, ln, ptClientProxy, link)
+			pt.Cmethod(name, "tcp", ln.Addr())
+
+			log.Infof("%s - registered listener: %s", name, ln.Addr())
+
+			listeners = append(listeners, ln)
+			launched = true
 		}
-
-		go clientAcceptLoop(f, ln, ptClientProxy)
-		pt.Cmethod(name, socks5.Version(), ln.Addr())
-
-		log.Infof("%s - registered listener: %s", name, ln.Addr())
-
-		listeners = append(listeners, ln)
-		launched = true
 	}
+
 	pt.CmethodsDone()
 
 	return
 }
 
-func clientAcceptLoop(f base.ClientFactory, ln net.Listener, proxyURI *url.URL) error {
+func clientAcceptLoop(f base.ClientFactory, ln net.Listener, proxyURI *url.URL, linkInfo LinkInfo) error {
 	defer ln.Close()
 	for {
 		conn, err := ln.Accept()
@@ -115,30 +159,29 @@ func clientAcceptLoop(f base.ClientFactory, ln net.Listener, proxyURI *url.URL) 
 			}
 			continue
 		}
-		go clientHandler(f, conn, proxyURI)
+		go clientHandler(f, conn, proxyURI, linkInfo)
 	}
 }
 
-func clientHandler(f base.ClientFactory, conn net.Conn, proxyURI *url.URL) {
+func clientHandler(f base.ClientFactory, conn net.Conn, proxyURI *url.URL, linkInfo LinkInfo) {
 	defer conn.Close()
 	termMon.onHandlerStart()
 	defer termMon.onHandlerFinish()
 
 	name := f.Transport().Name()
 
-	// Read the client's SOCKS handshake.
-	socksReq, err := socks5.Handshake(conn)
+	fakeReq, err := parseClientParameters(strings.Replace(linkInfo.PtArgs, ",", ";", -1))
+
 	if err != nil {
 		log.Errorf("%s - client failed socks handshake: %s", name, err)
 		return
 	}
-	addrStr := log.ElideAddr(socksReq.Target)
+	addrStr := log.ElideAddr(linkInfo.ServerAddr)
 
 	// Deal with arguments.
-	args, err := f.ParseArgs(&socksReq.Args)
+	args, err := f.ParseArgs(&fakeReq)
 	if err != nil {
 		log.Errorf("%s(%s) - invalid arguments: %s", name, addrStr, err)
-		socksReq.Reply(socks5.ReplyGeneralFailure)
 		return
 	}
 
@@ -150,23 +193,18 @@ func clientHandler(f base.ClientFactory, conn net.Conn, proxyURI *url.URL) {
 			// This should basically never happen, since config protocol
 			// verifies this.
 			log.Errorf("%s(%s) - failed to obtain proxy dialer: %s", name, addrStr, log.ElideError(err))
-			socksReq.Reply(socks5.ReplyGeneralFailure)
 			return
 		}
 		dialFn = dialer.Dial
 	}
-	remote, err := f.Dial("tcp", socksReq.Target, dialFn, args)
-	if err != nil {
-		log.Errorf("%s(%s) - outgoing connection failed: %s", name, addrStr, log.ElideError(err))
-		socksReq.Reply(socks5.ErrorToReplyCode(err))
+
+	remote, er := f.Dial("tcp", linkInfo.ServerAddr, dialFn, args)
+
+	if er != nil {
+		log.Errorf("%s(%s) - outgoing connection failed: %s", name, addrStr, log.ElideError(er))
 		return
 	}
 	defer remote.Close()
-	err = socksReq.Reply(socks5.ReplySucceeded)
-	if err != nil {
-		log.Errorf("%s(%s) - SOCKS reply failed: %s", name, addrStr, log.ElideError(err))
-		return
-	}
 
 	if err = copyLoop(conn, remote); err != nil {
 		log.Warnf("%s(%s) - closed connection: %s", name, addrStr, log.ElideError(err))
@@ -379,4 +417,67 @@ func main() {
 		ln.Close()
 	}
 	termMon.wait(true)
+}
+
+// parseClientParameters takes a client parameter string formatted according to
+// "Passing PT-specific parameters to a client PT" in the pluggable transport
+// specification, and returns it as a goptlib Args structure.
+//
+// This is functionally identical to the equivalently named goptlib routine.
+func parseClientParameters(argStr string) (args pt.Args, err error) {
+	args = make(pt.Args)
+	if len(argStr) == 0 {
+		return
+	}
+
+	var key string
+	var acc []byte
+	prevIsEscape := false
+	for idx, ch := range []byte(argStr) {
+		switch ch {
+		case '\\':
+			prevIsEscape = !prevIsEscape
+			if prevIsEscape {
+				continue
+			}
+		case '=':
+			if !prevIsEscape {
+				if key != "" {
+					break
+				}
+				if len(acc) == 0 {
+					return nil, fmt.Errorf("unexpected '=' at %d", idx)
+				}
+				key = string(acc)
+				acc = nil
+				continue
+			}
+		case ';':
+			if !prevIsEscape {
+				if key == "" || idx == len(argStr)-1 {
+					return nil, fmt.Errorf("unexpected ';' at %d", idx)
+				}
+				args.Add(key, string(acc))
+				key = ""
+				acc = nil
+				continue
+			}
+		default:
+			if prevIsEscape {
+				return nil, fmt.Errorf("unexpected '\\' at %d", idx-1)
+			}
+		}
+		prevIsEscape = false
+		acc = append(acc, ch)
+	}
+	if prevIsEscape {
+		return nil, fmt.Errorf("underminated escape character")
+	}
+	// Handle the final k,v pair if any.
+	if key == "" {
+		return nil, fmt.Errorf("final key with no value")
+	}
+	args.Add(key, string(acc))
+
+	return args, nil
 }

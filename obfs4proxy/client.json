@@ -1,0 +1,6 @@
+{"obfs4":[
+    {"ListenAddr":"127.0.0.1:351",
+     "ServerAddr":"127.0.0.1:8838",
+     "PtArgs":"CHANGE THIS FIELD TO WHAT YOUR runserver.sh PRINT"
+    }
+]}
